@@ -1,17 +1,27 @@
 package com.example.gpsfirebase;
 
 import android.Manifest;
-import android.content.Context;
+import android.content.IntentSender;
 import android.content.pm.PackageManager;
 import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
+import android.support.annotation.NonNull;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.FragmentActivity;
 import android.os.Bundle;
+import android.util.Log;
 import android.widget.Toast;
 
-import com.google.android.gms.maps.CameraUpdate;
+import com.example.gpsfirebase.Helpers.FetchURL;
+import com.example.gpsfirebase.Helpers.TaskLoadedCallback;
+import com.google.android.gms.common.api.ResolvableApiException;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.LocationSettingsRequest;
+import com.google.android.gms.location.LocationSettingsResponse;
+import com.google.android.gms.location.SettingsClient;
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.OnMapReadyCallback;
@@ -21,39 +31,111 @@ import com.google.android.gms.maps.model.CameraPosition;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.Marker;
 import com.google.android.gms.maps.model.MarkerOptions;
-import com.google.firebase.database.DataSnapshot;
-import com.google.firebase.database.DatabaseError;
+import com.google.android.gms.maps.model.Polyline;
+import com.google.android.gms.maps.model.PolylineOptions;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
 import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
-import com.google.firebase.database.ValueEventListener;
-import com.google.firebase.database.DatabaseReference;
 
-import java.util.ArrayList;
-import java.util.Date;
 
-public class GPS extends FragmentActivity implements OnMapReadyCallback, LocationListener {
+public class GPS extends FragmentActivity implements OnMapReadyCallback, TaskLoadedCallback {
 
-    private static final int REQUEST_PERMISSION_GPS = 0 ;
+    private static final int REQUEST_PERMISSION_GPS = 0;
+    private static final int REQUEST_CHECK_SETTINGS = 1;
+    private static final String REQUESTING_LOCATION_UPDATES_KEY = "localizacaoAtualiza";
     private GoogleMap mMap;
-    private Marker currentLocationMarker;
-    private LatLng currentLocationLatLong;
+    private Marker currentLocationMarker, destinyLocationMarker;
+    private LatLng currentLocationLatLong, destinyLocationLatLong;
+
+    //Pegando A ultima localização conhecida
+    private FusedLocationProviderClient fusedLocationClient;
+    boolean requestingLocationUpdates = true;
 
     private DatabaseReference mDatabase;
+    private LocationRequest locationRequest;
+    private LocationCallback locationCallback;
+    private Polyline currentPolyline;
 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_gps);
-        startGettingLocations();
-        mDatabase = FirebaseDatabase.getInstance().getReference().child("GPS");
+        createLocationRequest();
+
+        updateValuesFromBundle(savedInstanceState);
+
+        locationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(LocationResult locationResult) {
+                if (locationResult == null) {
+                    return;
+                }
+                for (Location location : locationResult.getLocations()) {
+                    mDatabase = FirebaseDatabase.getInstance().getReference().child("GPS").child("Tecnico");
+
+                    //Atualizar a interface do usuário com dados de localização
+
+
+                    if(currentLocationMarker != null){
+                        currentLocationMarker.remove();
+                    }
+
+                    //Add Marcador
+                    currentLocationLatLong = new LatLng(location.getLatitude(),location.getLongitude());
+                    MarkerOptions markerOptions = new MarkerOptions();
+                    markerOptions.position(currentLocationLatLong);
+                    markerOptions.icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_BLUE));
+                    markerOptions.title("Localização Atual");
+                    currentLocationMarker = mMap.addMarker(markerOptions);
+
+                    //Move para nova Localização
+                    new FetchURL(GPS.this)
+                            .execute(
+                                getUrl(destinyLocationMarker.getPosition(),
+                                        currentLocationMarker.getPosition(),"driving"),
+                                    "driving");
+
+
+                    CameraPosition cameraPosition = new CameraPosition.Builder().zoom(15).target(currentLocationLatLong).build();
+                    mMap.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition));
+
+
+
+                    //Gravando no Banco de dados do firebase
+                    LocationData locationData = new LocationData(location.getLatitude(),location.getLongitude());
+                    mDatabase.setValue(locationData);
+
+                    Toast.makeText(GPS.this,"Localização Atualizada", Toast.LENGTH_LONG).show();
+
+
+                }
+            }
+        };
+
+
+
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+
+
         // Obtain the SupportMapFragment and get notified when the map is ready to be used.
         SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
                 .findFragmentById(R.id.map);
         mapFragment.getMapAsync(this);
 
 
+    }
 
+    private void updateValuesFromBundle(Bundle savedInstanceState) {
+        if (savedInstanceState == null) {
+            return;
+        }
+        //Atualizando o value para requestingLocationUpdates para o Bundle
+        if (savedInstanceState.keySet().contains(REQUESTING_LOCATION_UPDATES_KEY)) {
+            requestingLocationUpdates = savedInstanceState.getBoolean(REQUESTING_LOCATION_UPDATES_KEY);
+        }
 
     }
 
@@ -61,80 +143,108 @@ public class GPS extends FragmentActivity implements OnMapReadyCallback, Locatio
     @Override
     public void onMapReady(GoogleMap googleMap) {
         mMap = googleMap;
-
-        // Add a marker in Sydney and move the camera
-        LatLng sydney = new LatLng(-34, 151);
-        mMap.addMarker(new MarkerOptions().position(sydney).title("Marker in Sydney"));
-        mMap.moveCamera(CameraUpdateFactory.newLatLng(sydney));
-    }
-
-    @Override
-    public void onLocationChanged(Location location) {
-        if(currentLocationMarker != null){
-            currentLocationMarker.remove();
-        }
-
-        //Add Marcador
-        currentLocationLatLong = new LatLng(location.getLatitude(),location.getLongitude());
+        destinyLocationLatLong = new LatLng(-22.884990,-43.499221);
         MarkerOptions markerOptions = new MarkerOptions();
-        markerOptions.position(currentLocationLatLong);
-        markerOptions.icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_BLUE));
-        markerOptions.title("Localização Atual");
-        currentLocationMarker = mMap.addMarker(markerOptions);
+        markerOptions.position(destinyLocationLatLong);
+        markerOptions.icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED));
+        markerOptions.title("Localização de Chegada");
+        destinyLocationMarker = mMap.addMarker(markerOptions);
 
-        //Move para nova Localização
-        CameraPosition cameraPosition = new CameraPosition.Builder().zoom(15).target(currentLocationLatLong).build();
-        mMap.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition));
-
-        //Gravando no Banco de dados do firebase
-        LocationData locationData = new LocationData(location.getLatitude(),location.getLongitude());
-        mDatabase.setValue(locationData);
-
-        Toast.makeText(this,"Localização Atualizada", Toast.LENGTH_LONG).show();
     }
 
+    @Override
+    protected void onPause() {
+        super.onPause();
+        stopLocationUpdates();
+    }
 
+    private void stopLocationUpdates() {
+        fusedLocationClient.removeLocationUpdates(locationCallback);
+    }
 
-    private void startGettingLocations() {
-        LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-        long MIN_DISTANCE_CHANGE_FOR_UPDATES = 10;
-        long MIN_TIME_BW_UPDATES = 1000 * 10;
-        if(ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)!= PackageManager.PERMISSION_GRANTED){
-            ActivityCompat.requestPermissions(this,new String[]{
-                        Manifest.permission.ACCESS_FINE_LOCATION,
-                        Manifest.permission.ACCESS_COARSE_LOCATION,
-                        Manifest.permission.INTERNET
-            }, REQUEST_PERMISSION_GPS );
-        }else{
-            boolean isGPS = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
-            boolean isNETWORK = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-
-            if(isGPS){
-                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER,MIN_TIME_BW_UPDATES,MIN_DISTANCE_CHANGE_FOR_UPDATES,this);
-            }else if(isNETWORK){
-                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,MIN_TIME_BW_UPDATES,MIN_DISTANCE_CHANGE_FOR_UPDATES,this);
-            }else{
-                Toast.makeText(this,"Não é possivel obter a localização", Toast.LENGTH_LONG).show();
-            }
-
-
-
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (requestingLocationUpdates) {
+            startLocationUpdates();
         }
+    }
 
+    private void startLocationUpdates() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.INTERNET
+            }, REQUEST_PERMISSION_GPS);
+        } else {
+            fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, null);
+        }
+    }
+
+    protected void createLocationRequest(){
+        locationRequest = LocationRequest.create();
+        locationRequest.setInterval(10000);
+        locationRequest.setFastestInterval(5000);
+        locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+
+        LocationSettingsRequest.Builder builder = new LocationSettingsRequest.Builder();
+        builder.addLocationRequest(locationRequest);
+
+        SettingsClient client = LocationServices.getSettingsClient(this);
+        Task<LocationSettingsResponse> task = client.checkLocationSettings(builder.build());
+
+        task.addOnSuccessListener(this, new OnSuccessListener<LocationSettingsResponse>() {
+            @Override
+            public void onSuccess(LocationSettingsResponse locationSettingsResponse) {
+
+            }
+        });
+
+        task.addOnFailureListener(this, new OnFailureListener() {
+            @Override
+            public void onFailure(@NonNull Exception e) {
+                if (e instanceof ResolvableApiException){
+                    // As configurações de localização não estão satisfeitas, mas isso pode ser corrigido
+                    // mostrando ao usuário uma caixa de diálogo.
+                    try{
+                        ResolvableApiException resolvable = (ResolvableApiException) e;
+                        resolvable.startResolutionForResult(GPS.this,REQUEST_CHECK_SETTINGS);
+                    }catch (IntentSender.SendIntentException sendEx){
+                        Log.e("ConfiguracaoSettings", sendEx.toString());
+                    }
+                }
+            }
+        });
     }
 
     @Override
-    public void onStatusChanged(String provider, int status, Bundle extras) {
+    protected void onSaveInstanceState(Bundle outState){
+        outState.putBoolean(REQUESTING_LOCATION_UPDATES_KEY,requestingLocationUpdates);
+        super.onSaveInstanceState(outState);
+    }
 
+    private String getUrl(LatLng origin, LatLng dest, String directionMode) {
+        // Origin of route
+        String str_origin = "origin=" + origin.latitude + "," + origin.longitude;
+        // Destination of route
+        String str_dest = "destination=" + dest.latitude + "," + dest.longitude;
+        // Mode
+        String mode = "mode=" + directionMode;
+        // Building the parameters to the web service
+        String parameters = str_origin + "&" + str_dest + "&" + mode;
+        // Output format
+        String output = "json";
+        // Building the url to the web service
+        String url = "https://maps.googleapis.com/maps/api/directions/" + output + "?" + parameters + "&key=" + getString(R.string.google_maps_key);
+        return url;
     }
 
     @Override
-    public void onProviderEnabled(String provider) {
-
-    }
-
-    @Override
-    public void onProviderDisabled(String provider) {
+    public void onTaskdone(Object... values) {
+        if (currentPolyline != null)
+            currentPolyline.remove();
+        currentPolyline = mMap.addPolyline((PolylineOptions) values[0]);
 
     }
 }
